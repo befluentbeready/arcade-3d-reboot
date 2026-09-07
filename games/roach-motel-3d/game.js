@@ -108,14 +108,22 @@
   scene.fog = new THREE.Fog(0x0a0a16, 8, 26);
 
   var BASE_FOV_DEG = 62;
-  var BASE_CAMERA_Z = 10.2;
+  var BASE_CAMERA_Y = 6.4;
+  var BASE_CAMERA_Z = 15;
+  var LOOK_AT_Y = 3.0;
+  var LOOK_AT_Z = -1;
   var camera = new THREE.PerspectiveCamera(BASE_FOV_DEG, 1, 0.1, 100);
-  camera.position.set(0, 3.1, BASE_CAMERA_Z);
-  camera.lookAt(0, 3.6, -2);
+  camera.position.set(0, BASE_CAMERA_Y, BASE_CAMERA_Z);
+  camera.lookAt(0, LOOK_AT_Y, LOOK_AT_Z);
 
   // Half-width (world units) that must stay in frame: the buggy's travel
-  // range plus a little margin for the outer barricades/swarm columns.
-  var NEEDED_HALF_WIDTH = CFG.buggyBoundX + 1.5;
+  // range plus margin for the outer barricades/swarm columns. Generous on
+  // purpose — the buggy sits much closer to the camera than the swarm does,
+  // so it needs more backing-off room to stay fully on screen at narrow
+  // aspect ratios than a naive swarm-only estimate would give it (a real
+  // bug caught after shipping: earlier builds framed the swarm correctly
+  // but pushed the player's own buggy off the bottom of the screen).
+  var NEEDED_HALF_WIDTH = CFG.buggyBoundX + 4.4;
   var BASE_VFOV_RAD = THREE.MathUtils.degToRad(BASE_FOV_DEG);
 
   function resize() {
@@ -131,7 +139,7 @@
     var requiredDepth = NEEDED_HALF_WIDTH / (Math.tan(BASE_VFOV_RAD / 2) * aspect);
     var extraBack = Math.max(0, requiredDepth - BASE_CAMERA_Z);
     camera.position.z = BASE_CAMERA_Z + extraBack;
-    camera.lookAt(0, 3.6, -2);
+    camera.lookAt(0, LOOK_AT_Y, LOOK_AT_Z);
     camera.updateProjectionMatrix();
 
     // THREE.Fog distance is measured from the camera, so dollying back for
@@ -411,13 +419,17 @@
     var mesh = new THREE.Mesh(bulletGeo, playerBulletMat);
     mesh.position.set(buggyGroup.position.x, 1.0, CFG.buggyZ - 0.6);
     scene.add(mesh);
-    var dz = CFG.roachZ - CFG.buggyZ;
-    var dy = bottomRowY() - 1.0;
-    var dist = Math.sqrt(dz * dz + dy * dy) || 1;
+    // Two-phase flight, not a straight line aimed at a single fixed point:
+    // the bolt first closes the distance to the swarm's depth plane (no
+    // vertical motion yet), then climbs straight up through that plane.
+    // A single straight-line-to-a-target shot (the original approach) can
+    // only ever reach whichever row it was aimed at when fired — every
+    // other row is geometrically unreachable, which is exactly the "can't
+    // hit the top row" bug a player caught after shipping. Climbing only
+    // once at the swarm's depth guarantees every row gets swept.
     playerBullets.push({
       mesh: mesh,
-      vy: (dy / dist) * CFG.bulletSpeed,
-      vz: (dz / dist) * CFG.bulletSpeed,
+      approaching: true,
     });
     SFX.laser();
   }
@@ -589,27 +601,37 @@
   function stepBullets(dt) {
     for (var i = playerBullets.length - 1; i >= 0; i--) {
       var b = playerBullets[i];
-      b.mesh.position.y += b.vy * dt;
-      b.mesh.position.z += b.vz * dt;
+      if (b.approaching) {
+        // Phase 1: close the distance to the swarm's depth plane. No
+        // vertical motion yet — see firePlayerBullet for why that matters.
+        b.mesh.position.z -= CFG.bulletSpeed * 2.5 * dt;
+        if (b.mesh.position.z <= CFG.roachZ) {
+          b.mesh.position.z = CFG.roachZ;
+          b.approaching = false;
+        }
+      } else {
+        // Phase 2: climb straight up through the swarm's depth plane,
+        // sweeping past every row in turn (closest/lowest first).
+        b.mesh.position.y += CFG.bulletSpeed * dt;
+      }
 
-      var blocked = b.vz < 0 && barricadeBlock(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z);
+      var blocked = barricadeBlock(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z);
       var hitRoach = null;
-      if (!blocked) {
+      if (!blocked && !b.approaching) {
         for (var j = 0; j < roaches.length; j++) {
           var ro = roaches[j];
           if (!ro.alive) continue;
           var rx = swarmOffsetX + roachLocalX(ro.col);
           var ry = swarmY + roachLocalY(ro.row);
           if (Math.abs(b.mesh.position.x - rx) < CFG.hitRadiusX &&
-              Math.abs(b.mesh.position.y - ry) < CFG.hitRadiusY &&
-              b.mesh.position.z <= CFG.roachZ + 0.4) {
+              Math.abs(b.mesh.position.y - ry) < CFG.hitRadiusY) {
             hitRoach = ro;
             break;
           }
         }
       }
 
-      var offscreen = b.mesh.position.z < CFG.roachZ - 3 || b.mesh.position.y > CFG.swarmStartY + 3;
+      var offscreen = b.mesh.position.y > CFG.swarmStartY + 3;
       if (blocked || hitRoach || offscreen) {
         scene.remove(b.mesh);
         playerBullets.splice(i, 1);
