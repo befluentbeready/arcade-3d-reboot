@@ -1,7 +1,7 @@
 /* Roach Motel 3D — a 3D reboot of the 1978 Space Invaders loop.
  * Vanilla JS + Three.js (CDN, no build step). See /pipeline/PLAYBOOK.md
- * and games/roach-motel-3d/docs/{01-concept,02-mechanics}.md for the
- * design this implements.
+ * and games/roach-motel-3d/docs/{01-concept,02-mechanics,03-stages}.md
+ * for the design this implements.
  */
 (function () {
   'use strict';
@@ -12,11 +12,10 @@
   }
 
   // ---------------------------------------------------------------------
-  // Config — mirrors games/roach-motel-3d/docs/02-mechanics.md
+  // Config — mechanics shared by every stage. Per-stage numbers (grid
+  // size, enemy fire rate/aim, swarm speed, colors) live in STAGES below.
   // ---------------------------------------------------------------------
   var CFG = {
-    rows: 5,
-    cols: 11,
     colSpacing: 0.95,
     rowSpacing: 0.72,
     swarmStartY: 7.4,
@@ -31,17 +30,100 @@
     hitRadiusX: 0.5,
     hitRadiusY: 0.4,
     lives: 3,
-    pointsByRow: [30, 30, 20, 20, 10], // row 0 = top/back row
+    pointsByRow: [30, 30, 20, 20, 10], // row 0 = back row (top of the grid)
     truckMinDelayMs: 9000,
     truckMaxDelayMs: 17000,
     truckBonusMin: 50,
     truckBonusMax: 300,
     fullClearBonus: 50,
-    waveBaseIntervalStart: 620, // ms per horizontal step-equivalent at wave 1, full swarm
-    waveBaseIntervalFloor: 260,
-    roachFireMinMs: 1400,
-    roachFireMaxMs: 3600,
   };
+
+  // Max grid the shared InstancedMesh is sized for. Headroom above stage
+  // 5's 5x11 (55) so future stages (goal: 25 total, see docs/03-stages.md)
+  // can grow the grid further without a code change to the mesh capacity.
+  var MAX_ROWS = 6;
+  var MAX_COLS = 12;
+  var MAX_COUNT = MAX_ROWS * MAX_COLS;
+
+  // Barricade x-position presets, reused across stages so harder stages
+  // can simply use fewer/further-apart cover points.
+  var BARRICADES_4 = [-4.6, -1.55, 1.55, 4.6];
+  var BARRICADES_3 = [-3.1, 0, 3.1];
+  var BARRICADES_2 = [-2.2, 2.2];
+
+  // ---------------------------------------------------------------------
+  // Stage table — curated difficulty curve. Each stage widens the grid,
+  // speeds up the swarm, and (from stage 2 on) makes the roaches shoot
+  // back more often and more accurately. `id`/`name` beyond STAGES.length
+  // are generated procedurally by getStageConfig() so the game keeps
+  // going (and keeps escalating) past the last hand-built stage — see
+  // docs/03-stages.md for the plan to grow this table to 25.
+  // ---------------------------------------------------------------------
+  var STAGES = [
+    {
+      id: 1, name: 'Lobby Check-In',
+      rows: 2, cols: 6,
+      roachShoot: false, fireMin: 99999, fireMax: 99999, aimSkill: 0, salvo: 1,
+      swarmSpeedMul: 0.75, baseIntervalMs: 700,
+      barricadeXs: BARRICADES_4,
+      bg: 0x1a140a, fog: 0x1a140a, ground: 0x241c10, backdrop: 0x3a2c14, prop: 0xffcf7a,
+    },
+    {
+      id: 2, name: 'Kitchenette Cleanup',
+      rows: 3, cols: 7,
+      roachShoot: true, fireMin: 2400, fireMax: 4200, aimSkill: 0.15, salvo: 1,
+      swarmSpeedMul: 0.9, baseIntervalMs: 600,
+      barricadeXs: BARRICADES_4,
+      bg: 0x0a1a16, fog: 0x0a1a16, ground: 0x0f2620, backdrop: 0x123a30, prop: 0x7affc2,
+    },
+    {
+      id: 3, name: 'Bathroom Blitz',
+      rows: 3, cols: 9,
+      roachShoot: true, fireMin: 1900, fireMax: 3400, aimSkill: 0.35, salvo: 1,
+      swarmSpeedMul: 1.0, baseIntervalMs: 520,
+      barricadeXs: BARRICADES_4,
+      bg: 0x0a1622, fog: 0x0a1622, ground: 0x0f2030, backdrop: 0x123048, prop: 0x7ad9ff,
+    },
+    {
+      id: 4, name: 'Parking Lot Ambush',
+      rows: 4, cols: 10,
+      roachShoot: true, fireMin: 1400, fireMax: 2600, aimSkill: 0.6, salvo: 1,
+      swarmSpeedMul: 1.15, baseIntervalMs: 440,
+      barricadeXs: BARRICADES_3,
+      bg: 0x1c0f1a, fog: 0x1c0f1a, ground: 0x2a1626, backdrop: 0x3a1c38, prop: 0xff9a5c,
+    },
+    {
+      id: 5, name: 'Neon Sign Showdown',
+      rows: 5, cols: 11,
+      roachShoot: true, fireMin: 1000, fireMax: 2000, aimSkill: 0.85, salvo: 2,
+      swarmSpeedMul: 1.3, baseIntervalMs: 360,
+      barricadeXs: BARRICADES_2,
+      bg: 0x160a1e, fog: 0x160a1e, ground: 0x220f2e, backdrop: 0x3a1246, prop: 0xff5ec4,
+    },
+  ];
+
+  function getStageConfig(n) {
+    if (n >= 1 && n <= STAGES.length) return STAGES[n - 1];
+    // Beyond the curated table: keep stage 5's grid/pressure as a floor and
+    // keep escalating, cycling the five backgrounds for variety instead of
+    // repeating "Neon Sign Showdown" forever. Caps keep it always playable.
+    var base = STAGES[STAGES.length - 1];
+    var theme = STAGES[(n - 1) % STAGES.length];
+    var extra = n - STAGES.length;
+    return {
+      id: n, name: 'Extended Stay ' + extra,
+      rows: base.rows, cols: base.cols,
+      roachShoot: true,
+      fireMin: Math.max(550, base.fireMin - extra * 25),
+      fireMax: Math.max(950, base.fireMax - extra * 35),
+      aimSkill: Math.min(0.97, base.aimSkill + extra * 0.01),
+      salvo: extra > 6 ? 3 : base.salvo,
+      swarmSpeedMul: Math.min(2.2, base.swarmSpeedMul + extra * 0.03),
+      baseIntervalMs: Math.max(240, base.baseIntervalMs - extra * 6),
+      barricadeXs: base.barricadeXs,
+      bg: theme.bg, fog: theme.fog, ground: theme.ground, backdrop: theme.backdrop, prop: theme.prop,
+    };
+  }
 
   // ---------------------------------------------------------------------
   // Small helpers
@@ -122,7 +204,9 @@
   // so it needs more backing-off room to stay fully on screen at narrow
   // aspect ratios than a naive swarm-only estimate would give it (a real
   // bug caught after shipping: earlier builds framed the swarm correctly
-  // but pushed the player's own buggy off the bottom of the screen).
+  // but pushed the player's own buggy off the bottom of the screen). This
+  // is sized for stage 5's full 11-wide grid, the widest any stage uses,
+  // so every stage's swarm comfortably fits inside it.
   var NEEDED_HALF_WIDTH = CFG.buggyBoundX + 4.4;
   var BASE_VFOV_RAD = THREE.MathUtils.degToRad(BASE_FOV_DEG);
 
@@ -164,13 +248,35 @@
   moonLight.position.set(-4, 10, -6);
   scene.add(moonLight);
 
-  // Moon (cheap emissive sphere, purely decorative).
-  var moon = new THREE.Mesh(
+  // Stage "prop" (cheap emissive sphere, purely decorative) — reused across
+  // every stage rather than swapped, just recolored/rotated on transition.
+  // Doubles as a moon in stage 1, a porch lamp in others, a neon glow in
+  // the last — same one draw call throughout.
+  var propMesh = new THREE.Mesh(
     new THREE.SphereGeometry(1.4, 12, 12),
     new THREE.MeshBasicMaterial({ color: 0xeaf3ff })
   );
-  moon.position.set(-9, 11, -20);
-  scene.add(moon);
+  propMesh.position.set(-9, 11, -20);
+  scene.add(propMesh);
+
+  // Backdrop panel — one big cheap unlit plane behind the swarm, recolored
+  // per stage, so each stage reads as a distinct "room" without adding any
+  // new geometry per stage (keeps the payload/draw-call budget flat as the
+  // stage table grows toward 25).
+  var backdropPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(30, 16),
+    new THREE.MeshBasicMaterial({ color: 0x3a2c14, transparent: true, opacity: 0.55 })
+  );
+  backdropPanel.position.set(0, 8, CFG.roachZ - 7);
+  scene.add(backdropPanel);
+
+  function applyStageColorsInstant(cfg) {
+    scene.background.set(cfg.bg);
+    scene.fog.color.set(cfg.fog);
+    ground.material.color.set(cfg.ground);
+    backdropPanel.material.color.set(cfg.backdrop);
+    propMesh.material.color.set(cfg.prop);
+  }
 
   // Ground / lane — flat plane, cheap, gives roaches and buggy something to sit on visually.
   var ground = new THREE.Mesh(
@@ -239,8 +345,10 @@
 
   // ---------------------------------------------------------------------
   // Roach swarm — InstancedMesh for a cheap, single-draw-call crowd.
+  // Sized to MAX_COUNT (the largest grid any stage — current or future —
+  // uses); a given stage only activates its own rows*cols worth of
+  // instances and parks the rest off-screen (see updateRoachInstances).
   // ---------------------------------------------------------------------
-  var ROACH_COUNT = CFG.rows * CFG.cols;
   var roachGeometry = new THREE.IcosahedronGeometry(0.32, 0);
   roachGeometry.scale(1, 0.6, 1.3);
   // Base color is white: InstancedMesh multiplies each instance's color
@@ -249,52 +357,56 @@
   var roachMaterial = new THREE.MeshLambertMaterial({
     color: 0xffffff, emissive: 0x0e4a26,
   });
-  var roachMesh = new THREE.InstancedMesh(roachGeometry, roachMaterial, ROACH_COUNT);
+  var roachMesh = new THREE.InstancedMesh(roachGeometry, roachMaterial, MAX_COUNT);
   roachMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   scene.add(roachMesh);
 
   var roachColorAlt = new THREE.Color(0xb26bff);
   var roachColorBase = new THREE.Color(0x39ff8f);
-  var roachColors = new Float32Array(ROACH_COUNT * 3);
+  var roachColors = new Float32Array(MAX_COUNT * 3);
   roachMesh.instanceColor = new THREE.InstancedBufferAttribute(roachColors, 3);
 
-  var roaches = []; // { row, col, alive }
+  var roaches = []; // { row, col, alive } — length is the CURRENT stage's rows*cols
   var dummy = new THREE.Object3D();
+  var curRows = 5, curCols = 11; // overwritten by initRoaches() before first real use
 
-  function roachLocalX(col) { return (col - (CFG.cols - 1) / 2) * CFG.colSpacing; }
+  function roachLocalX(col) { return (col - (curCols - 1) / 2) * CFG.colSpacing; }
   function roachLocalY(row) { return -row * CFG.rowSpacing; }
 
-  function initRoaches() {
+  function initRoaches(cfg) {
     roaches.length = 0;
-    for (var r = 0; r < CFG.rows; r++) {
-      for (var c = 0; c < CFG.cols; c++) {
+    curRows = cfg.rows;
+    curCols = cfg.cols;
+    for (var r = 0; r < curRows; r++) {
+      for (var c = 0; c < curCols; c++) {
         roaches.push({ row: r, col: c, alive: true });
       }
     }
-    roachesAlive = ROACH_COUNT;
+    roachesAlive = roaches.length;
+    swarmHalfWidth = ((curCols - 1) / 2) * CFG.colSpacing;
   }
 
   var swarmDir = 1;
   var swarmOffsetX = 0;
   var swarmY = CFG.swarmStartY;
-  var swarmHalfWidth = ((CFG.cols - 1) / 2) * CFG.colSpacing;
+  var swarmHalfWidth = ((11 - 1) / 2) * CFG.colSpacing; // recomputed per stage in initRoaches
   var swarmXBound = 6.4;
-  var roachesAlive = ROACH_COUNT;
+  var roachesAlive = 0;
 
   function swarmSpeed() {
     // Continuous horizontal speed (units/sec). Scales up as fewer roaches
-    // remain, and each wave starts faster than the last (both floored so
-    // it stays playable on the 30fps floor target).
-    var remainingFraction = roachesAlive / ROACH_COUNT;
-    var base = 1000 / waveBaseIntervalMs; // "steps/sec equivalent" -> units/sec scale below
-    var speedUnitsPerSec = 1.1 * base * CFG.colSpacing * (1.9 - remainingFraction);
+    // remain, and each stage has its own base pace + multiplier (both
+    // floored/capped so it stays playable on the 30fps floor target).
+    var remainingFraction = roachesAlive / Math.max(1, roaches.length);
+    var base = 1000 / curStage.baseIntervalMs; // "steps/sec equivalent" -> units/sec scale below
+    var speedUnitsPerSec = 1.1 * base * CFG.colSpacing * (1.9 - remainingFraction) * curStage.swarmSpeedMul;
     return speedUnitsPerSec;
   }
 
   function updateRoachInstances() {
-    for (var i = 0; i < roaches.length; i++) {
-      var ro = roaches[i];
-      if (!ro.alive) {
+    for (var i = 0; i < MAX_COUNT; i++) {
+      var ro = i < roaches.length ? roaches[i] : null;
+      if (!ro || !ro.alive) {
         dummy.position.set(0, -999, 0); // parked off-screen
         dummy.scale.set(0.0001, 0.0001, 0.0001);
         dummy.updateMatrix();
@@ -310,7 +422,9 @@
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
       roachMesh.setMatrixAt(i, dummy.matrix);
-      var col = ro.row >= 3 ? roachColorAlt : roachColorBase; // back two rows glow violet
+      // Front two rows (closest to the player) glow violet; scales with the
+      // stage's actual row count instead of assuming a fixed 5-row grid.
+      var col = ro.row >= curRows - 2 ? roachColorAlt : roachColorBase;
       roachMesh.setColorAt(i, col);
     }
     roachMesh.instanceMatrix.needsUpdate = true;
@@ -318,20 +432,20 @@
   }
 
   function bottomRowY() {
-    return swarmY + roachLocalY(CFG.rows - 1);
+    return swarmY + roachLocalY(curRows - 1);
   }
 
   // ---------------------------------------------------------------------
-  // Barricades — 4 crumbling scrap barricades between buggy and swarm.
+  // Barricades — crumbling scrap barricades between buggy and swarm.
+  // Which/how many are present is stage-driven (see BARRICADES_* + STAGES).
   // ---------------------------------------------------------------------
   var barricades = [];
-  function initBarricades() {
+  function initBarricades(xs) {
     barricades.forEach(function (b) {
       b.chunks.forEach(function (c) { scene.remove(c.mesh); });
     });
     barricades.length = 0;
 
-    var xs = [-4.6, -1.55, 1.55, 4.6];
     var chunkGeo = new THREE.BoxGeometry(0.5, 0.35, 0.5);
     var chunkMat = new THREE.MeshLambertMaterial({ color: 0x6b6f5a });
 
@@ -409,8 +523,8 @@
   // ---------------------------------------------------------------------
   // Bullets
   // ---------------------------------------------------------------------
-  var playerBullets = []; // {mesh, vx, vy, vz}
-  var roachBullets = [];
+  var playerBullets = []; // {mesh, approaching}
+  var roachBullets = []; // {mesh, x, vy, vz}
   var bulletGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.32, 6);
   var playerBulletMat = new THREE.MeshBasicMaterial({ color: 0x9dffcf });
   var roachBulletMat = new THREE.MeshBasicMaterial({ color: 0xff6b6b });
@@ -434,10 +548,14 @@
     SFX.laser();
   }
 
-  function fireRoachBullet() {
-    var alive = roaches.filter(function (r) { return r.alive; });
-    if (!alive.length) return;
-    var shooter = alive[Math.floor(Math.random() * alive.length)];
+  function clearAllBullets() {
+    for (var i = playerBullets.length - 1; i >= 0; i--) scene.remove(playerBullets[i].mesh);
+    playerBullets.length = 0;
+    for (var k = roachBullets.length - 1; k >= 0; k--) scene.remove(roachBullets[k].mesh);
+    roachBullets.length = 0;
+  }
+
+  function spawnRoachBullet(shooter) {
     var x = swarmOffsetX + roachLocalX(shooter.col);
     var y = swarmY + roachLocalY(shooter.row);
     var mesh = new THREE.Mesh(bulletGeo, roachBulletMat);
@@ -453,19 +571,62 @@
       vz: (dz / dist) * (CFG.bulletSpeed * 0.7),
     });
   }
-  var nextRoachFireAt = performance.now() + rand(CFG.roachFireMinMs, CFG.roachFireMaxMs);
+
+  function fireRoachBullet() {
+    if (!curStage.roachShoot) return;
+    var alive = [];
+    for (var i = 0; i < roaches.length; i++) if (roaches[i].alive) alive.push(roaches[i]);
+    if (!alive.length) return;
+
+    // "Shooting intelligence" (curStage.aimSkill, 0..1): a dumb roach fires
+    // from a uniformly random column; a smart one is more likely to fire
+    // from whichever alive column currently sits closest to the buggy's
+    // x position, so hits become far less avoidable in later stages.
+    // curStage.salvo lets top stages fire more than one shot per volley.
+    var pool = alive.slice();
+    var shots = Math.min(curStage.salvo || 1, pool.length);
+    for (var s = 0; s < shots; s++) {
+      var shooter;
+      if (Math.random() < curStage.aimSkill) {
+        var best = pool[0], bestDist = Infinity;
+        for (var p = 0; p < pool.length; p++) {
+          var px = swarmOffsetX + roachLocalX(pool[p].col);
+          var d = Math.abs(px - buggyGroup.position.x);
+          if (d < bestDist) { bestDist = d; best = pool[p]; }
+        }
+        shooter = best;
+      } else {
+        shooter = pool[Math.floor(Math.random() * pool.length)];
+      }
+      pool.splice(pool.indexOf(shooter), 1);
+      spawnRoachBullet(shooter);
+      if (!pool.length) break;
+    }
+  }
+  var nextRoachFireAt = Infinity; // set for real once a stage starts
 
   // ---------------------------------------------------------------------
   // Game state
   // ---------------------------------------------------------------------
-  var STATE = { BOOT: 0, START: 1, PLAYING: 2, GAMEOVER: 3 };
+  var STATE = { BOOT: 0, START: 1, PLAYING: 2, TRANSITION: 3, GAMEOVER: 4 };
   var state = STATE.START;
-  var score = 0, lives = CFG.lives, wave = 1;
+  var score = 0, lives = CFG.lives, stage = 1;
   var highScore = 0;
-  var waveBaseIntervalMs = CFG.waveBaseIntervalStart;
+  var curStage = getStageConfig(1);
   var lastFireAt = -Infinity;
   var moveLeft = false, moveRight = false;
   var wasHitDuringWave = false;
+
+  // Stage-clear transition: color lerp + banner, no gameplay logic runs
+  // while state === STATE.TRANSITION (see stepTransition/tick).
+  var transition = {
+    fromBg: new THREE.Color(), toBg: new THREE.Color(),
+    fromFog: new THREE.Color(), toFog: new THREE.Color(),
+    fromGround: new THREE.Color(), toGround: new THREE.Color(),
+    fromBackdrop: new THREE.Color(), toBackdrop: new THREE.Color(),
+    fromProp: new THREE.Color(), toProp: new THREE.Color(),
+    startAt: 0, duration: 1500, nextStage: 1, nextCfg: null,
+  };
 
   try {
     highScore = parseInt(localStorage.getItem('roachMotel3dHighScore') || '0', 10) || 0;
@@ -474,30 +635,89 @@
 
   function updateHud() {
     el('score').textContent = String(score);
-    el('wave').textContent = String(wave);
+    el('stage').textContent = String(stage);
     el('lives').textContent = new Array(Math.max(lives, 0) + 1).join('▲') || '';
   }
 
-  function resetWave(keepScore) {
-    initRoaches();
+  function showStageBanner(clearedId, nextCfg) {
+    el('stage-banner-clear').textContent = 'STAGE ' + clearedId + ' CLEAR';
+    el('stage-banner-next').textContent = 'STAGE ' + nextCfg.id + ' — ' + nextCfg.name;
+    el('stage-banner').classList.remove('hidden');
+  }
+  function hideStageBanner() {
+    el('stage-banner').classList.add('hidden');
+  }
+  function flashPulse() {
+    var f = el('stage-flash');
+    if (!f) return;
+    f.classList.remove('pulse');
+    void f.offsetWidth; // force reflow so the transition retriggers
+    f.classList.add('pulse');
+    setTimeout(function () { f.classList.remove('pulse'); }, 90);
+  }
+
+  function startStage(n, cfgMaybe) {
+    stage = n;
+    curStage = cfgMaybe || getStageConfig(n);
+    initRoaches(curStage);
     swarmY = CFG.swarmStartY;
     swarmOffsetX = 0;
     swarmDir = 1;
     wasHitDuringWave = false;
+    initBarricades(curStage.barricadeXs);
+    applyStageColorsInstant(curStage);
     updateRoachInstances();
+    nextRoachFireAt = performance.now() + rand(curStage.fireMin, curStage.fireMax);
     scheduleTruck(2500);
+    updateHud();
+    state = STATE.PLAYING;
+  }
+
+  function beginStageTransition() {
+    var clearedId = stage;
+    if (!wasHitDuringWave) score += CFG.fullClearBonus;
+    SFX.wave();
+    clearAllBullets();
+
+    var nextId = stage + 1;
+    var nextCfg = getStageConfig(nextId);
+    transition.fromBg.copy(scene.background); transition.toBg.set(nextCfg.bg);
+    transition.fromFog.copy(scene.fog.color); transition.toFog.set(nextCfg.fog);
+    transition.fromGround.copy(ground.material.color); transition.toGround.set(nextCfg.ground);
+    transition.fromBackdrop.copy(backdropPanel.material.color); transition.toBackdrop.set(nextCfg.backdrop);
+    transition.fromProp.copy(propMesh.material.color); transition.toProp.set(nextCfg.prop);
+    transition.startAt = performance.now();
+    transition.duration = 1500;
+    transition.nextStage = nextId;
+    transition.nextCfg = nextCfg;
+
+    state = STATE.TRANSITION;
+    updateHud();
+    showStageBanner(clearedId, nextCfg);
+    flashPulse();
+  }
+
+  function stepTransition(now) {
+    var t = clamp((now - transition.startAt) / transition.duration, 0, 1);
+    var e = t * t * (3 - 2 * t); // smoothstep — fluid ease in/out, not a hard cut
+    scene.background.copy(transition.fromBg).lerp(transition.toBg, e);
+    scene.fog.color.copy(transition.fromFog).lerp(transition.toFog, e);
+    ground.material.color.copy(transition.fromGround).lerp(transition.toGround, e);
+    backdropPanel.material.color.copy(transition.fromBackdrop).lerp(transition.toBackdrop, e);
+    propMesh.material.color.copy(transition.fromProp).lerp(transition.toProp, e);
+    propMesh.rotation.y += 0.03;
+    if (t >= 1) {
+      hideStageBanner();
+      startStage(transition.nextStage, transition.nextCfg);
+    }
   }
 
   function startGame() {
     ensureAudio();
-    score = 0; lives = CFG.lives; wave = 1;
-    waveBaseIntervalMs = CFG.waveBaseIntervalStart;
-    initBarricades();
-    resetWave();
-    updateHud();
+    score = 0; lives = CFG.lives;
+    startStage(1);
     el('start-screen').classList.add('hidden');
     el('gameover-screen').classList.add('hidden');
-    state = STATE.PLAYING;
   }
 
   function loseLife() {
@@ -519,20 +739,9 @@
       try { localStorage.setItem('roachMotel3dHighScore', String(highScore)); } catch (e) { /* ignore */ }
     }
     el('highscore').textContent = String(highScore);
-    el('final-score-line').textContent = 'Score ' + score + ' — reached wave ' + wave;
+    el('final-score-line').textContent = 'Score ' + score + ' — reached stage ' + stage;
     el('new-high').classList.toggle('hidden', !isNew);
     el('gameover-screen').classList.remove('hidden');
-  }
-
-  function onFullClear() {
-    if (!wasHitDuringWave) {
-      score += CFG.fullClearBonus;
-    }
-    wave += 1;
-    waveBaseIntervalMs = Math.max(CFG.waveBaseIntervalFloor, waveBaseIntervalMs - 35);
-    SFX.wave();
-    updateHud();
-    resetWave();
   }
 
   // ---------------------------------------------------------------------
@@ -643,7 +852,17 @@
           SFX.roachPop();
           updateHud();
           updateRoachInstances();
-          if (roachesAlive <= 0) onFullClear();
+          if (roachesAlive <= 0) {
+            // Stage clear: beginStageTransition() clears both bullet arrays
+            // (clearAllBullets) so any leftover bullets don't hang around,
+            // frozen, into the next stage. That truncates the very array
+            // this loop is mid-iteration over, so we must stop touching it
+            // immediately rather than looping back around to a now-stale
+            // index (that was throwing "Cannot read properties of
+            // undefined" — caught by an automated stage-clear test).
+            beginStageTransition();
+            return;
+          }
         }
       }
     }
@@ -703,7 +922,7 @@
   }
 
   function stepBuggy(dt) {
-    var dir = (moveRight ? 1 : 0) - (moveLeft ? 1 : 0);
+    var dir = state === STATE.PLAYING ? ((moveRight ? 1 : 0) - (moveLeft ? 1 : 0)) : 0;
     buggyGroup.position.x = clamp(
       buggyGroup.position.x + dir * CFG.buggySpeed * dt,
       -CFG.buggyBoundX, CFG.buggyBoundX
@@ -725,11 +944,13 @@
       stepSwarm(dt);
       stepBullets(dt);
       stepTruck(dt, now);
-      if (now >= nextRoachFireAt && roachesAlive > 0) {
+      if (curStage.roachShoot && now >= nextRoachFireAt && roachesAlive > 0) {
         fireRoachBullet();
-        nextRoachFireAt = now + rand(CFG.roachFireMinMs, CFG.roachFireMaxMs);
+        nextRoachFireAt = now + rand(curStage.fireMin, curStage.fireMax);
       }
       updateRoachInstances();
+    } else if (state === STATE.TRANSITION) {
+      stepTransition(now);
     }
     stepBuggy(dt);
 
@@ -744,10 +965,33 @@
     }
   }
 
-  initBarricades();
-  initRoaches();
+  initBarricades(curStage.barricadeXs);
+  initRoaches(curStage);
+  applyStageColorsInstant(curStage);
   updateRoachInstances();
   updateHud();
   window.__roachMotelReady = true;
+  // Read-only introspection for automated self-checks only (mirrors
+  // __roachMotelFps/__roachMotelRenderer above) — never read by the game itself.
+  Object.defineProperty(window, '__roachMotelDebug', {
+    get: function () {
+      return {
+        state: state, stage: stage, roachesAlive: roachesAlive,
+        stageRoachCount: roaches.length, roachShoot: curStage.roachShoot,
+        aimSkill: curStage.aimSkill, buggyX: buggyGroup.position.x,
+        roachBulletCount: roachBullets.length, playerBulletCount: playerBullets.length,
+        lives: lives,
+      };
+    },
+  });
+  // Test-only: jump straight into a given stage without playing through the
+  // ones before it. Never called by the game itself.
+  window.__testJumpToStage = function (n) {
+    ensureAudio();
+    score = 0; lives = CFG.lives;
+    startStage(n);
+    el('start-screen').classList.add('hidden');
+    el('gameover-screen').classList.add('hidden');
+  };
   requestAnimationFrame(tick);
 })();
