@@ -1,6 +1,6 @@
 game: roach-motel-3d
 phase: DONE
-last_agent: Agent 4 — Developer
+last_agent: Agent 5 — Stage Director
 validator_verdict: PENDING
 rejection_reason: none
-revision_count: 0
+revision_count: 1

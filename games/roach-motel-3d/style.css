@@ -84,6 +84,67 @@ html, body {
   opacity: 0.5;
 }
 
+/* ---------- Stage transition ---------- */
+
+#stage-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0) 62%);
+  opacity: 0;
+  transition: opacity 0.5s ease-out;
+}
+
+#stage-flash.pulse {
+  opacity: 0.55;
+  transition: opacity 0.08s ease-in;
+}
+
+.stage-banner {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  pointer-events: none;
+  text-align: center;
+}
+
+.stage-banner.hidden {
+  display: none;
+}
+
+.stage-banner-clear {
+  font-size: clamp(1.4rem, 5vw, 2.6rem);
+  letter-spacing: 0.14em;
+  color: #ffd76e;
+  text-shadow: 0 0 18px rgba(255, 215, 110, 0.7);
+  animation: stageClearIn 0.5s ease-out both;
+}
+
+.stage-banner-next {
+  font-size: clamp(0.9rem, 3vw, 1.3rem);
+  letter-spacing: 0.1em;
+  color: #9dffcf;
+  text-shadow: 0 0 10px rgba(157, 255, 207, 0.5);
+  opacity: 0;
+  animation: stageNextIn 0.6s ease-out 0.35s both;
+}
+
+@keyframes stageClearIn {
+  from { opacity: 0; transform: scale(0.7) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes stageNextIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* ---------- Overlays ---------- */
 
 .overlay {
